@@ -3,143 +3,331 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#08040c">
 <title>Luv u babychou ♥</title>
 <style>
-  html,body{margin:0;height:100%;background:#0b0612;overflow:hidden}
-  canvas{display:block}
+  html, body { margin: 0; height: 100%; overflow: hidden; background: radial-gradient(ellipse at 50% 45%, #1c0b26 0%, #08040c 65%); }
+  body::after { content: ''; position: fixed; inset: 0; pointer-events: none; background: radial-gradient(ellipse at center, transparent 50%, rgba(0, 0, 0, .55)); }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+  #glow { filter: blur(12px) saturate(1.5); }
 </style>
 </head>
 <body>
-<canvas id="c" role="img" aria-label="Animation : un papillon se transforme en fleur, puis en cœur, puis en texte « Luv u babychou »"></canvas>
+<canvas id="glow"></canvas>
+<canvas id="c" role="img" aria-label="Animation ASCII en 3D : un papillon se transforme en fleur, puis en cœur, puis en texte « Luv u babychou »"></canvas>
 <script>
+'use strict';
 const c = document.getElementById('c'), ctx = c.getContext('2d');
-const N = 1600, TAU = Math.PI * 2, rnd = Math.random;
-const M = 2.4, HOLD = 3.2, D = 0.7; // durée du morph, durée de pause, décalage max par caractère (s)
-const DELAY = Array.from({length: N}, () => rnd() * D);
-let W, H, S, shapes, t0;
+const gc = document.getElementById('glow'), gctx = gc.getContext('2d');
+const N = 16000, TAU = Math.PI * 2, rnd = Math.random;
+const CAM = 4;                                  // distance caméra -> origine
+const RAMP = '.,:;+=*o%#@';                     // du plus sombre au plus éclairé (sans - | / \ réservés aux traînées)
+const DIRS = '-\\|/';                           // traînée selon la direction du mouvement à l'écran
+const FAST = 24;                                // vitesse (en caractères/s) à partir de laquelle on dessine une traînée
+const START = 1.6, M = 3, HOLD = 4, SWEEP = 1.2; // départ, durée d'une transformation, pause, étalement de la vague (s)
 
-const ease = x => x < .5 ? 4 * x * x * x : 1 - (-2 * x + 2) ** 3 / 2;
 const clamp = x => x < 0 ? 0 : x > 1 ? 1 : x;
-const pick = s => s[rnd() * s.length | 0];
+const ease = x => x < .5 ? 4 * x * x * x : 1 - (-2 * x + 2) ** 3 / 2;
+const norm = v => { const l = Math.hypot(...v) || 1; return v.map(a => a / l); };
+const LIGHT = norm([-.35, .45, .82]), HALF = norm([LIGHT[0], LIGHT[1], LIGHT[2] + 1]);
 
-// Tri par angle : chaque caractère va vers un point voisin de la forme suivante -> morph fluide
-function finish(a, chars) {
-  a.forEach(p => { p.ch = pick(chars); p.a = Math.atan2(p.y, p.x); });
-  return a.sort((p, q) => p.a - q.a);
-}
+// ---------- Échantillonnage des formes : points [x, y, z, nx, ny, nz, teinte, saturation, albédo, tag] ----------
 
-function scatter() {
-  const a = [];
-  for (let i = 0; i < N; i++)
-    a.push({x: (rnd() * 2 - 1) * W / S / 2, y: (rnd() * 2 - 1) * H / S / 2, h: 220 + rnd() * 100, s: 60, l: 20 + rnd() * 30});
-  return finish(a, ".'`,:");
-}
-
-function butterfly() { // courbe papillon de Temple Fay
-  const a = [];
-  for (let i = 0; i < N; i++) {
-    const t = rnd() * 12 * Math.PI;
-    const r = Math.exp(Math.cos(t)) - 2 * Math.cos(4 * t) - Math.sin(t / 12) ** 5;
-    const k = i % 3 ? 1 : Math.sqrt(rnd());
-    a.push({x: Math.sin(t) * r * k / 3.6, y: (Math.cos(t) * r * k - 0.9) / 3.6, h: 285 - Math.abs(r) * 22, s: 90, l: 50 + 15 * k});
+// Points répartis uniformément (par aire) sur une surface paramétrique f(u, v), u et v dans [0, 1]
+function surface(pts, count, f, col, tag = 0) {
+  const e = 1e-4, J = (u, v) => {
+    const p = f(u, v), a = f(u + e, v), b = f(u, v + e);
+    const du = [a[0] - p[0], a[1] - p[1], a[2] - p[2]], dv = [b[0] - p[0], b[1] - p[1], b[2] - p[2]];
+    const n = [du[1] * dv[2] - du[2] * dv[1], du[2] * dv[0] - du[0] * dv[2], du[0] * dv[1] - du[1] * dv[0]];
+    return [p, n, Math.hypot(...n)];
+  };
+  let max = 0;
+  for (let i = 0; i < 400; i++) max = Math.max(max, J(rnd(), rnd())[2]);
+  for (let k = 0; k < Math.round(count);) {
+    const u = rnd(), v = rnd(), [p, n, j] = J(u, v);
+    if (!j || rnd() * max * 1.3 > j) continue;
+    pts.push([...p, n[0] / j, n[1] / j, n[2] / j, ...col(u, v), tag]);
+    k++;
   }
-  return finish(a, '*~^+o');
+}
+
+function orb() { // petite sphère lumineuse qui bat, entourée de quelques étoiles
+  const pts = [];
+  surface(pts, N * .96, (u, v) => {
+    const th = u * Math.PI, ph = v * TAU;
+    return [.26 * Math.sin(th) * Math.cos(ph), .26 * Math.cos(th), .26 * Math.sin(th) * Math.sin(ph)];
+  }, (u, v) => [300 - 40 * u, 85, .75 + .25 * Math.sin(v * TAU * 6)]); // bandes : la rotation se voit dans les caractères
+  while (pts.length < N) {
+    const d = norm([rnd() - .5, rnd() - .5, rnd() - .5]), r = 1.2 + rnd();
+    pts.push([d[0] * r * 1.4, d[1] * r, d[2] * r * .6, ...d, 230 + rnd() * 60, 60, .3, 0]);
+  }
+  return pts;
+}
+
+function butterfly() {
+  const pts = [];
+  const ell = (x, y, cx, cy, rx, ry, a) => {
+    const dx = x - cx, dy = y - cy, co = Math.cos(a), si = Math.sin(a);
+    return ((dx * co + dy * si) / rx) ** 2 + ((dy * co - dx * si) / ry) ** 2;
+  };
+  while (pts.length < N * .84) { // ailes : union de deux ellipses ; tag = côté (-1 / 1) pour le battement
+    const u = rnd() * 1.15, y = rnd() * 1.6 - .75;
+    const q = Math.min(ell(u, y, .55, .33, .58, .36, .5), ell(u, y, .38, -.36, .4, .27, -.6));
+    if (q > 1 || u < .03) continue;
+    const side = rnd() < .5 ? -1 : 1, ang = Math.atan2(y, u);
+    let h = 272 - 80 * Math.min(1, Math.hypot(u, y) / 1.05), s = 90, a = .95;
+    if (Math.abs(Math.sin(ang * 9)) < .07) a = .55;                     // nervures
+    if (q > .8) { h = 255; s = 55; a = .3; }                            // bordure sombre
+    if (q > .86 && Math.sin(ang * 26) > .7) { h = 200; s = 15; a = 1; } // points blancs
+    pts.push([side * u, y, -.12 * u * u, ...norm([side * .24 * u, 0, 1]), h, s, a, side]); // aile légèrement courbée
+  }
+  const col = () => [280, 25, .45];
+  const ellipsoid = (rx, ry, cy) => (u, v) => {
+    const th = u * Math.PI, ph = v * TAU;
+    return [rx * Math.sin(th) * Math.cos(ph), cy + ry * Math.cos(th), rx * Math.sin(th) * Math.sin(ph)];
+  };
+  surface(pts, N * .09, ellipsoid(.065, .42, -.05), col); // corps
+  surface(pts, N * .03, ellipsoid(.085, .085, .45), col); // tête
+  for (const sd of [-1, 1]) surface(pts, N * .02, (u, v) => // antennes
+    [sd * (.03 + .26 * u ** 1.4) + .012 * Math.cos(v * TAU), .5 + .45 * u, .04 * u + .012 * Math.sin(v * TAU)], col);
+  return pts;
 }
 
 function flower() {
-  const a = [];
-  for (let i = 0; i < N; i++) {
-    const u = rnd();
-    if (u < .62) { // pétales (rose à 6 pétales)
-      const th = rnd() * TAU, k = Math.sqrt(rnd()), r = Math.abs(Math.cos(3 * th)) * .55 * k;
-      a.push({x: r * Math.cos(th), y: .3 + r * Math.sin(th), h: 320 + 25 * k, s: 90, l: 75 - 20 * k});
-    } else if (u < .74) { // cœur de la fleur
-      const th = rnd() * TAU, r = .11 * Math.sqrt(rnd());
-      a.push({x: r * Math.cos(th), y: .3 + r * Math.sin(th), h: 48, s: 100, l: 60});
-    } else if (u < .88) { // tige
-      const y = .2 - rnd() * 1.15;
-      a.push({x: .03 * Math.sin(y * 6) + (rnd() - .5) * .03, y, h: 130, s: 60, l: 42});
-    } else { // feuilles
-      const s = rnd(), side = rnd() < .5 ? -1 : 1, ang = .5;
-      const dx = side * Math.cos(ang), dy = Math.sin(ang), along = s * .38, across = Math.sin(Math.PI * s) * .1 * (rnd() * 2 - 1);
-      a.push({x: along * dx - across * dy, y: -.5 + along * dy + across * dx, h: 110, s: 65, l: 45});
+  const pts = [], hy = .38; // hauteur du cœur de la fleur
+  const petals = (count, n, len, wid, cup, z0, a0, hue) => {
+    for (let k = 0; k < n; k++) {
+      const al = a0 + k * TAU / n, ca = Math.cos(al), sa = Math.sin(al);
+      surface(pts, count / n, (s, v) => {
+        const r = .06 + len * s, l = (2 * v - 1) * wid * Math.sin(Math.PI * (.08 + .92 * s)) ** .7;
+        return [r * ca - l * sa, hy + r * sa + l * ca, z0 + cup * r * r + .15 * l * l]; // pétale creusé en coupe
+      }, (s, v) => [hue, 85, (.5 + .5 * s) * (Math.abs(v - .5) < .04 ? .75 : 1) * (1 - .45 * Math.abs(2 * v - 1) ** 4)]);
+    }
+  };
+  petals(N * .5, 6, .56, .19, .55, 0, .26, 332);
+  petals(N * .18, 5, .32, .15, 1.1, .04, .9, 345);
+  surface(pts, N * .08, (u, v) => { // cœur doré
+    const th = u * Math.PI / 2, ph = v * TAU;
+    return [.12 * Math.sin(th) * Math.cos(ph), hy + .12 * Math.sin(th) * Math.sin(ph), .07 + .07 * Math.cos(th)];
+  }, (u, v) => [44, 95, Math.sin(v * 70 + u * 40) > 0 ? 1 : .6]);
+  surface(pts, N * .1, (u, v) => // tige
+    [.05 * Math.sin(u * 3) + .028 * Math.cos(v * TAU), hy - .05 - 1.5 * u, -.04 + .028 * Math.sin(v * TAU)], () => [128, 55, .6]);
+  for (const [sd, yb] of [[-1, -.45], [1, -.72]]) { // feuilles
+    const bx = .05 * Math.sin((hy - .05 - yb) / 1.5 * 3), dx = sd * Math.cos(.55), dy = Math.sin(.55);
+    surface(pts, N * .07, (s, v) => {
+      const l = (2 * v - 1) * .12 * Math.sin(Math.PI * s);
+      return [bx + dx * .5 * s - dy * l, yb + dy * .5 * s + dx * l, -.04 + .22 * s * s + 1.5 * l * l];
+    }, (s, v) => [112, 60, (.45 + .45 * s) * (Math.abs(v - .5) < .05 ? .7 : 1)]);
+  }
+  return pts;
+}
+
+function heart() { // cœur 3D bombé : chaque tranche est une courbe de cœur
+  const pts = [], k = .95 / 19;
+  surface(pts, N, (u, v) => {
+    u *= Math.PI; v *= TAU;
+    const su = Math.sin(u);
+    return [k * su * (15 * Math.sin(v) - 4 * Math.sin(3 * v)),
+            k * (su * (15 * Math.cos(v) - 5 * Math.cos(2 * v) - 2 * Math.cos(3 * v) - Math.cos(v)) + 2.65),
+            k * 8 * Math.cos(u)];
+  }, (u, v) => [347 + 8 * Math.cos(v), 88, 1]);
+  return pts;
+}
+
+function blur(a, w, h, r) { // flou boîte séparable
+  const t = new Float32Array(a.length), o = new Float32Array(a.length), n = 2 * r + 1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let s = 0;
+    for (let k = -r; k <= r; k++) s += a[y * w + Math.min(w - 1, Math.max(0, x + k))];
+    t[y * w + x] = s / n;
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let s = 0;
+    for (let k = -r; k <= r; k++) s += t[Math.min(h - 1, Math.max(0, y + k)) * w + x];
+    o[y * w + x] = s / n;
+  }
+  return o;
+}
+
+function text(lines) { // texte en relief biseauté, coordonnées normalisées (largeur 1)
+  const fs = 140, o = document.createElement('canvas'), g = o.getContext('2d');
+  const font = `900 ${fs}px "Arial Rounded MT Bold", "Trebuchet MS", "Segoe UI", Arial, sans-serif`;
+  g.font = font;
+  const lh = fs * 1.08, w = Math.ceil(Math.max(...lines.map(l => g.measureText(l).width))) + 30, h = Math.ceil(lh * lines.length) + 30;
+  o.width = w; o.height = h;
+  g.font = font; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#fff';
+  lines.forEach((l, i) => g.fillText(l, w / 2, 15 + lh * (i + .5)));
+  const px = g.getImageData(0, 0, w, h).data, m = new Float32Array(w * h);
+  for (let i = 0; i < m.length; i++) m[i] = px[4 * i + 3] / 255;
+  const b = blur(blur(m, w, h, 5), w, h, 5), on = [], edge = [];
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    if (m[i] < .5) continue;
+    on.push(i);
+    if (m[i - 1] < .5 || m[i + 1] < .5 || m[i - w] < .5 || m[i + w] < .5) edge.push(i);
+  }
+  const D = .035, zf = i => D * (.3 + .7 * b[i]), pts = [];
+  for (let k = 0; k < N; k++) {
+    const side = k < N * .15, i = side ? edge[rnd() * edge.length | 0] : on[rnd() * on.length | 0];
+    const x = i % w, y = i / w | 0, X = (x + rnd() - w / 2) / w, Y = (h / 2 - y - rnd()) / w, hue = 325 + 55 * x / w;
+    if (side) { // flancs : normale = vers l'extérieur de la lettre
+      const n = norm([m[i - 1] - m[i + 1], m[i + w] - m[i - w], 0]);
+      pts.push([X, Y, rnd() * zf(i), ...n, hue, 85, .9, 0]);
+    } else {    // face avant : normale tirée du masque flouté = biseau arrondi
+      const gx = (b[i + 1] - b[i - 1]) / 2 * w * D * .7, gy = (b[i + w] - b[i - w]) / 2 * w * D * .7;
+      pts.push([X, Y, zf(i), ...norm([-gx, gy, 1]), hue, 85, 1, 0]);
     }
   }
-  return finish(a, '@o*%&');
+  return {pts, aspect: h / w};
 }
 
-function heart() { // remplissage uniforme de (x²+y²-1)³ - x²y³ ≤ 0, bord plus clair
-  const a = [];
-  while (a.length < N) {
-    const x = (rnd() * 2 - 1) * 1.15, y = rnd() * 2.25 - 1, f = (x * x + y * y - 1) ** 3 - x * x * y ** 3;
-    if (f <= 0) a.push({x: x * .8, y: y * .8 - .1, h: 345 + rnd() * 20, s: 95, l: f > -.03 ? 68 : 42 + rnd() * 15});
+// Range les points en bandes horizontales puis de gauche à droite : la particule i occupe
+// la même zone relative dans chaque forme, la transformation reste lisible.
+function build(pts, keyOf, rot, extra = {}) {
+  while (pts.length < N) pts.push(pts[rnd() * pts.length | 0]);
+  pts.length = N;
+  pts.sort((p, q) => q[1] - p[1]);
+  for (let b = 0, K = 100; b < K; b++) {
+    const lo = b * N / K | 0, band = pts.slice(lo, (b + 1) * N / K | 0).sort((p, q) => p[0] - q[0]);
+    band.forEach((p, j) => pts[lo + j] = p);
   }
-  return finish(a, '#@*+<3');
+  const sh = {rot, sc: 1, ...extra, p: new Float32Array(3 * N), n: new Float32Array(3 * N), h: new Float32Array(N),
+    s: new Float32Array(N), a: new Float32Array(N), key: new Float32Array(N), tag: new Int8Array(N)};
+  const ks = pts.map(keyOf), k0 = Math.min(...ks), k1 = Math.max(...ks);
+  pts.forEach((p, i) => {
+    sh.p.set(p.slice(0, 3), 3 * i); sh.n.set(p.slice(3, 6), 3 * i);
+    sh.h[i] = p[6]; sh.s[i] = p[7]; sh.a[i] = p[8]; sh.tag[i] = p[9];
+    sh.key[i] = .85 * (ks[i] - k0) / (k1 - k0 || 1) + .15 * rnd(); // ordre d'arrivée des particules
+  });
+  return sh;
 }
 
-function text() { // échantillonne les pixels du texte dessiné hors écran
-  const lines = W < H * 1.2 ? ['Luv u', 'babychou'] : ['Luv u babychou'];
-  const o = document.createElement('canvas'), g = o.getContext('2d'), fs = 120;
-  const font = `900 ${fs}px "Trebuchet MS", "Arial Rounded MT Bold", Arial, sans-serif`;
-  g.font = font;
-  o.width = Math.ceil(Math.max(...lines.map(l => g.measureText(l).width))) + 20;
-  o.height = Math.ceil(lines.length * fs * 1.15) + 20;
-  g.font = font; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#fff';
-  lines.forEach((l, i) => g.fillText(l, o.width / 2, 10 + fs * 1.15 * (i + .5)));
-  const d = g.getImageData(0, 0, o.width, o.height).data, px = [];
-  for (let y = 0; y < o.height; y += 2)
-    for (let x = 0; x < o.width; x += 2)
-      if (d[(y * o.width + x) * 4 + 3] > 128) px.push([x, y]);
-  px.sort(() => rnd() - .5);
-  const sc = Math.min(.9 * W / S / o.width, (lines.length > 1 ? 1.5 : .9) / o.height), a = [];
-  for (let i = 0; i < N; i++) {
-    const [x, y] = px[i % px.length];
-    a.push({x: (x - o.width / 2) * sc, y: (o.height / 2 - y) * sc, h: 320 + 60 * x / o.width, s: 95, l: 68});
-  }
-  return finish(a, '*+#@%&');
-}
-
-// Mouvement propre à chaque forme pendant qu'elle est affichée
-const MOD = [
-  (x, y, t, i) => [x + .01 * Math.sin(t + i), y + .01 * Math.cos(t * 1.3 + i)], // étoiles
-  (x, y, t) => [x * (.6 + .4 * Math.cos(t * 4)), y + .03 * Math.sin(t * 2)],    // battement d'ailes
-  (x, y, t) => [x + .04 * Math.sin(t * 1.5) * (y + 1), y],                       // fleur qui se balance
-  (x, y, t) => { const k = 1 + .07 * Math.sin(t * 4) ** 8; return [x * k, y * k]; }, // cœur qui bat
-  (x, y, t) => [x, y + .012 * Math.sin(t * 3 + x * 5)],                          // vague sur le texte
+// rot(temps local) -> [lacet, tangage] ; key = ordre dans lequel la forme se construit
+const textShape = lines => { // s'écrit de gauche à droite
+  const T = text(lines);
+  return build(T.pts, p => p[0], lt => [.3 * Math.sin(lt * .6), .08 * Math.sin(lt * .45)], {aspect: T.aspect, lines: lines + ''});
+};
+const SH = [
+  build(orb(), p => p[0], lt => [lt * .25, .3], {beat: true}),
+  build(butterfly(), p => Math.hypot(p[0], p[1]), lt => [.5 * Math.sin(lt * .5), -.5], {flap: true}), // du corps vers les ailes
+  build(flower(), p => p[1], lt => [.45 * Math.sin(lt * .5), -.22], {sc: .9}),                         // pousse de bas en haut
+  build(heart(), p => Math.hypot(p[0], p[1]), lt => [.55 * Math.sin(lt), .1 * Math.sin(lt * .7)], {beat: true}),
+  null, // texte : construit dans resize() selon l'orientation de l'écran
 ];
+const tStart = k => k && START + (k - 1) * (M + HOLD);
+SH.forEach((s, k) => s && (s.t0 = tStart(k)));
 
-function resize() {
-  const r = devicePixelRatio || 1;
-  W = innerWidth; H = innerHeight;
-  c.width = W * r; c.height = H * r; c.style.width = W + 'px'; c.style.height = H + 'px';
-  ctx.setTransform(r, 0, 0, r, 0, 0);
-  S = Math.min(W, H) * .42;
-  ctx.font = `bold ${Math.max(9, S * .05) | 0}px ui-monospace, Menlo, Consolas, monospace`;
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  if (shapes) shapes[4] = text();
+const beat = t => { const p = t % 1.1; return Math.exp(-(((p - .15) / .06) ** 2)) + .6 * Math.exp(-(((p - .38) / .07) ** 2)); };
+
+// Positions et normales animées puis tournées d'une forme à l'instant t
+function pose(sh, t, P, Q) {
+  const [yaw, pitch] = sh.rot(t - sh.t0), cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const f = .35 + .55 * Math.sin(t * 3.4), cf = Math.cos(f), sf = Math.sin(f); // battement d'ailes
+  const k = sh.sc * (sh.beat ? 1 + .07 * beat(t) : 1), bob = sh.flap ? .05 * Math.sin(t * 1.7) : 0;
+  const {p, n, tag} = sh;
+  for (let i = 0, j = 0; i < N; i++, j += 3) {
+    let x = p[j], y = p[j + 1], z = p[j + 2], nx = n[j], ny = n[j + 1], nz = n[j + 2];
+    const s = tag[i];
+    if (s) { // rotation de l'aile autour du corps
+      const u = s * x, nu = s * nx, wx = u * cf - z * sf, wn = nu * cf - nz * sf;
+      z = u * sf + z * cf; x = s * wx; nz = nu * sf + nz * cf; nx = s * wn;
+    }
+    x *= k; y = y * k + bob; z *= k;
+    let x1 = x * cy + z * sy, z1 = z * cy - x * sy;
+    P[j] = x1; P[j + 1] = y * cp - z1 * sp; P[j + 2] = y * sp + z1 * cp;
+    x1 = nx * cy + nz * sy; z1 = nz * cy - nx * sy;
+    Q[j] = x1; Q[j + 1] = ny * cp - z1 * sp; Q[j + 2] = ny * sp + z1 * cp;
+  }
 }
 
-function frame(now) {
-  t0 ??= now;
-  const t = (now - t0) / 1000;
-  const seg = Math.min(t / (M + HOLD) | 0, shapes.length - 2), lt = t - seg * (M + HOLD);
-  const A = shapes[seg], B = shapes[seg + 1], ma = MOD[seg], mb = MOD[seg + 1];
-  ctx.fillStyle = 'rgba(11,6,18,.3)'; // traînées lumineuses
-  ctx.fillRect(0, 0, W, H);
-  for (let i = 0; i < N; i++) {
-    const p = A[i], q = B[i], e = ease(clamp((lt - DELAY[i]) / (M - D)));
-    const [ax, ay] = ma(p.x, p.y, t, i), [bx, by] = mb(q.x, q.y, t, i);
-    const w = Math.sin(Math.PI * e) * .25; // tourbillon au milieu de la transition
-    const x = ax + (bx - ax) * e + w * Math.cos(i * 2.4 + t), y = ay + (by - ay) * e + w * Math.sin(i * 2.4 + t);
-    const dh = ((q.h - p.h) % 360 + 540) % 360 - 180;
-    ctx.fillStyle = `hsl(${p.h + dh * e},${p.s + (q.s - p.s) * e}%,${p.l + (q.l - p.l) * e}%)`;
-    ctx.fillText(e < .5 ? p.ch : q.ch, W / 2 + x * S, H / 2 - y * S);
+const COLORS = new Map();
+function color(h, s, l) { // couleurs quantifiées et mises en cache
+  const key = (((Math.round(h / 4) % 90) + 90) % 90) * 10000 + Math.round(s / 10) * 100 + Math.round(l / 4);
+  let v = COLORS.get(key);
+  if (!v) COLORS.set(key, v = `hsl(${(key / 10000 | 0) * 4},${(key / 100 | 0) % 100 * 10}%,${key % 100 * 4}%)`);
+  return v;
+}
+
+let W, H, S, cw, chh, cols, rows, zb, win, t0, last = -1;
+const PA = new Float32Array(3 * N), NA = new Float32Array(3 * N), PB = new Float32Array(3 * N), NB = new Float32Array(3 * N);
+const E = new Float32Array(N), Z = new Float32Array(N), SX = new Float32Array(N), SY = new Float32Array(N), VX = new Float32Array(N), VY = new Float32Array(N);
+
+function frame(ms) {
+  t0 ??= ms;
+  const t = (ms - t0) / 1000, dt = t - last, reset = last < 0 || dt > .1;
+  last = t;
+  const seg = Math.max(0, Math.min(SH.length - 2, Math.floor((t - START) / (M + HOLD))));
+  const lt = t - START - seg * (M + HOLD), A = SH[seg], B = SH[seg + 1];
+  pose(A, t, PA, NA); pose(B, t, PB, NB);
+  zb.fill(-1e9); win.fill(-1);
+
+  // 1. Mélange des deux formes, projection en perspective, tampon de profondeur par case de caractère
+  for (let i = 0, j = 0; i < N; i++, j += 3) {
+    const e = E[i] = ease(clamp((lt - B.key[i] * SWEEP) / (M - SWEEP)));
+    let x = PA[j] + (PB[j] - PA[j]) * e, y = PA[j + 1] + (PB[j + 1] - PA[j + 1]) * e, z = PA[j + 2] + (PB[j + 2] - PA[j + 2]) * e;
+    if (e > 0 && e < 1) { // tourbillon pendant la transformation
+      const m = Math.sin(Math.PI * e), a = 1.6 * m, ca = Math.cos(a), sa = Math.sin(a), g = 1 + .35 * m;
+      const x1 = (x * ca + z * sa) * g;
+      z = (z * ca - x * sa) * g; x = x1; y *= 1 + .12 * m;
+    }
+    const d = CAM - z, k = d > .3 ? CAM / d * S : 0, sx = W / 2 + x * k, sy = H / 2 - y * k;
+    if (reset) VX[i] = VY[i] = 0;
+    else if (dt > 0) { VX[i] += ((sx - SX[i]) / dt - VX[i]) * .35; VY[i] += ((sy - SY[i]) / dt - VY[i]) * .35; }
+    SX[i] = sx; SY[i] = sy; Z[i] = z;
+    if (!k || sx < 0 || sy < 0 || sx >= W || sy >= H) continue;
+    const cell = (sy / chh | 0) * cols + (sx / cw | 0);
+    if (z > zb[cell]) { zb[cell] = z; win[cell] = i; }
   }
+
+  // 2. Un caractère par case : traînée directionnelle si ça bouge vite, sinon densité selon l'éclairage
+  ctx.clearRect(0, 0, W, H);
+  let prev = '';
+  for (let cell = 0; cell < cols * rows; cell++) {
+    const i = win[cell];
+    if (i < 0) continue;
+    const e = E[i], j = 3 * i;
+    let [nx, ny, nz] = norm([NA[j] + (NB[j] - NA[j]) * e, NA[j + 1] + (NB[j + 1] - NA[j + 1]) * e, NA[j + 2] + (NB[j + 2] - NA[j + 2]) * e]);
+    if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; } // éclairage des deux faces
+    const dif = Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
+    const spec = Math.max(0, nx * HALF[0] + ny * HALF[1] + nz * HALF[2]) ** 28;
+    const fog = .7 + .3 * clamp((Z[i] + 1.4) / 2.8);
+    const lum = clamp(((.15 + .85 * dif) * (A.a[i] + (B.a[i] - A.a[i]) * e) + .5 * spec) * fog);
+    const dh = ((B.h[i] - A.h[i]) % 360 + 540) % 360 - 180;
+    let ch, light = 28 + 56 * lum, sat = (A.s[i] + (B.s[i] - A.s[i]) * e) * (1 - .7 * spec);
+    if (Math.hypot(VX[i], VY[i]) / cw > FAST) {
+      ch = DIRS[(Math.round(Math.atan2(VY[i], VX[i]) / (Math.PI / 4)) % 4 + 4) % 4];
+      light += 10; sat *= .8;
+    } else ch = RAMP[Math.min(RAMP.length - 1, lum * RAMP.length | 0)];
+    const col = color(A.h[i] + dh * e, sat, light);
+    if (col !== prev) ctx.fillStyle = prev = col;
+    ctx.fillText(ch, (cell % cols) * cw, (cell / cols | 0) * chh);
+  }
+
+  // 3. Halo lumineux : copie basse résolution floutée en CSS sous le canvas principal
+  gctx.clearRect(0, 0, gc.width, gc.height);
+  gctx.drawImage(c, 0, 0, gc.width, gc.height);
   requestAnimationFrame(frame);
 }
 
+function resize() {
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  W = innerWidth; H = innerHeight; S = Math.min(W, H) * .36;
+  c.width = W * dpr; c.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const fs = Math.max(6, Math.min(W, H) / 62); // taille des caractères proportionnelle à l'écran
+  ctx.font = `bold ${fs}px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace`;
+  ctx.textBaseline = 'top';
+  cw = ctx.measureText('M').width; chh = fs * 1.18;
+  cols = Math.ceil(W / cw); rows = Math.ceil(H / chh);
+  zb = new Float32Array(cols * rows); win = new Int32Array(cols * rows);
+  gc.width = Math.max(1, W / 4 | 0); gc.height = Math.max(1, H / 4 | 0);
+  // en portrait, 3 lignes pour que les lettres restent lisibles sur téléphone
+  const lines = W < H ? ['Luv u', 'baby', 'chou'] : ['Luv u', 'babychou'];
+  if (SH[4]?.lines !== lines + '') { SH[4] = textShape(lines); SH[4].t0 = tStart(4); }
+  SH[4].sc = Math.min(.84 * W / S, .62 * H / S / SH[4].aspect);
+}
+
 resize();
-shapes = [scatter(), butterfly(), flower(), heart(), text()];
 addEventListener('resize', resize);
 requestAnimationFrame(frame);
 </script>
